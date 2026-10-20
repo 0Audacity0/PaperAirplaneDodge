@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Canyon Glide</title>
+<style>
+  :root { --fog:#24163a; --amber:#ffb24d; --mint:#6fffc9; --bone:#efe7d6; --coral:#ff6a4d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--fog); color:var(--bone);
+    font-family: Georgia, "Iowan Old Style", "Times New Roman", serif; overflow:hidden; touch-action:none; }
+  canvas { display:block; width:100%; height:100%; }
+  #hud { position:fixed; top:0; left:0; right:0; display:flex; justify-content:space-between;
+    padding:calc(14px + env(safe-area-inset-top,0px)) 18px 0; pointer-events:none; font-size:22px; }
+  #shield { color:var(--mint); letter-spacing:6px; }
+  #flash { position:fixed; inset:0; background:var(--coral); opacity:0; pointer-events:none; }
+  #panel { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; padding:24px; background:rgba(26,16,44,.78); }
+  #panel h1 { font-size:clamp(40px,9vw,76px); margin:0 0 8px; font-weight:400; font-style:italic; color:var(--amber); }
+  #panel p { max-width:36ch; line-height:1.55; margin:6px 0; font-size:18px; }
+  button { margin-top:22px; font:inherit; font-size:20px; padding:12px 28px; color:#24163a;
+    background:var(--amber); border:0; border-radius:999px; cursor:pointer; }
+  button:focus-visible { outline:3px solid var(--bone); outline-offset:3px; }
+  #joy { position:fixed; width:120px; height:120px; margin:-60px 0 0 -60px; border-radius:50%; border:2px solid rgba(239,231,214,.45);
+    background:rgba(239,231,214,.08); pointer-events:none; display:none; }
+  #knob { position:absolute; left:50%; top:50%; width:52px; height:52px; margin:-26px 0 0 -26px; border-radius:50%; background:rgba(255,178,77,.85); }
+  #pause { display:none; position:fixed; top:calc(10px + env(safe-area-inset-top,0px)); left:50%; transform:translateX(-50%);
+    width:48px; height:48px; margin:0; padding:0; font-size:16px; background:rgba(239,231,214,.18); color:var(--bone); }
+  #tip { position:fixed; left:0; right:0; bottom:calc(32px + env(safe-area-inset-bottom,0px)); text-align:center; font-size:20px;
+    opacity:.85; pointer-events:none; display:none; }
+  body.mobile.play #pause { display:block; }
+  body.mobile #hud { font-size:26px; }
+  body.mobile #panel p { font-size:20px; }
+  body.mobile button { font-size:22px; padding:16px 34px; }
+  body.mobile #pause { font-size:16px; padding:0; }
+  #mute { position:fixed; top:calc(54px + env(safe-area-inset-top,0px)); left:14px; width:44px; height:44px; margin:0; padding:0;
+    font-size:20px; border-radius:50%; background:rgba(239,231,214,.18); color:var(--bone); z-index:10; }
+  .hide { display:none !important; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Canyon Glide 3D game"></canvas>
+<div id="flash"></div>
+<div id="joy"><div id="knob"></div></div>
+<div id="tip"></div>
+<button id="mute" aria-label="Mute">&#128266;</button>
+<button id="pause" aria-label="Pause">&#10074;&#10074;</button>
+<div id="hud"><span id="score">0 m</span><span id="shield" aria-label="shields">&#9670;&#9670;&#9670;</span></div>
+<div id="panel">
+  <h1 id="title">Canyon Glide</h1>
+  <p id="msg">Skim down the canyon in your glider. Dodge the coral blocks and grab the green crystals for bonus points.</p>
+  <p id="how">Steer with your mouse, finger, or arrow keys / WASD.</p>
+  <button id="go">Take off</button>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('c');
+const gl = cv.getContext('webgl', { antialias: true });
+if (!gl) { $('msg').textContent = 'This game needs WebGL, which this browser doesn\u2019t have.'; $('go').classList.add('hide'); throw new Error('no webgl'); }
+
+/* ---------- shaders ---------- */
+const VS = `attribute vec3 aP; attribute vec3 aN;
+uniform mat4 uVP, uM, uRot; uniform vec3 uCam;
+varying vec3 vN; varying float vD;
+void main(){ vec4 w = uM*vec4(aP,1.); gl_Position = uVP*w;
+  vN = (uRot*vec4(aN,0.)).xyz; vD = length(w.xyz-uCam); }`;
+const FS = `precision mediump float;
+uniform vec3 uColor, uFog; uniform float uEmit;
+varying vec3 vN; varying float vD;
+void main(){ float l = .35 + .65*max(dot(normalize(vN), normalize(vec3(.4,1.,.6))), 0.);
+  vec3 c = uColor*l + uColor*uEmit;
+  float f = clamp((vD-25.)/115., 0., 1.);
+  gl_FragColor = vec4(mix(c, uFog, f*f*(3.-2.*f)), 1.); }`;
+function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog); gl.useProgram(prog);
+const U = n => gl.getUniformLocation(prog, n);
+const uVP = U('uVP'), uM = U('uM'), uRot = U('uRot'), uCam = U('uCam'), uColor = U('uColor'), uFog = U('uFog'), uEmit = U('uEmit');
+const aP = gl.getAttribLocation(prog, 'aP'), aN = gl.getAttribLocation(prog, 'aN');
+
+/* ---------- meshes ---------- */
+function makeMesh(data) {
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+  return { buf, n: data.length / 6 };
+}
+const cubeData = [];
+for (let a = 0; a < 3; a++) for (const s of [-1, 1]) {
+  const u = (a + 1) % 3, v = (a + 2) % 3, n = [0, 0, 0]; n[a] = s;
+  for (const [du, dv] of [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]]) {
+    const p = [0, 0, 0]; p[a] = s * .5; p[u] = du * .5; p[v] = dv * .5;
+    cubeData.push(...p, ...n);
+  }
+}
+const cube = makeMesh(cubeData);
+const shipData = [];
+const NO = [0,0,-1.2], L = [-.9,0,.6], R = [.9,0,.6], T = [0,.4,.6], B = [0,-.2,.6];
+for (const tri of [[NO,L,T],[NO,T,R],[NO,R,B],[NO,B,L],[L,T,R],[L,R,B]]) {
+  const [a, b, c] = tri;
+  const e1 = b.map((x, i) => x - a[i]), e2 = c.map((x, i) => x - a[i]);
+  let n = [e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+  const l = Math.hypot(...n); n = n.map(x => x / l);
+  const cen = a.map((x, i) => (x + b[i] + c[i]) / 3 - (i === 2 ? -0.1 : 0));
+  if (n[0]*cen[0] + n[1]*cen[1] + n[2]*cen[2] < 0) n = n.map(x => -x);
+  for (const p of tri) shipData.push(...p, ...n);
+}
+const ship = makeMesh(shipData);
+
+/* ---------- math (column-major) ---------- */
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += a[k*4+r] * b[c*4+k]; o[c*4+r] = s;
+  }
+  return o;
+}
+function persp(fov, asp, n, f) {
+  const t = 1 / Math.tan(fov / 2);
+  return new Float32Array([t/asp,0,0,0, 0,t,0,0, 0,0,(f+n)/(n-f),-1, 0,0,2*f*n/(n-f),0]);
+}
+function lookAt(e, c, up) {
+  let z = [e[0]-c[0], e[1]-c[1], e[2]-c[2]]; let l = Math.hypot(...z); z = z.map(x => x / l);
+  let x = [up[1]*z[2]-up[2]*z[1], up[2]*z[0]-up[0]*z[2], up[0]*z[1]-up[1]*z[0]]; l = Math.hypot(...x); x = x.map(v => v / l);
+  const y = [z[1]*x[2]-z[2]*x[1], z[2]*x[0]-z[0]*x[2], z[0]*x[1]-z[1]*x[0]];
+  return new Float32Array([x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0,
+    -(x[0]*e[0]+x[1]*e[1]+x[2]*e[2]), -(y[0]*e[0]+y[1]*e[1]+y[2]*e[2]), -(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]), 1]);
+}
+function hex(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255); }
+const FOG = hex('#24163a');
+gl.uniform3fv(uFog, FOG);
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(FOG[0], FOG[1], FOG[2], 1);
+
+let VP, eye = [0, 0, 0];
+function draw(mesh, x, y, z, sx, sy, sz, ry, rz, col, emit) {
+  const cy = Math.cos(ry), sy_ = Math.sin(ry), cz = Math.cos(rz), sz_ = Math.sin(rz);
+  const Ry = new Float32Array([cy,0,-sy_,0, 0,1,0,0, sy_,0,cy,0, 0,0,0,1]);
+  const Rz = new Float32Array([cz,sz_,0,0, -sz_,cz,0,0, 0,0,1,0, 0,0,0,1]);
+  const rot = mul(Rz, Ry);
+  const S = new Float32Array([sx,0,0,0, 0,sy,0,0, 0,0,sz,0, 0,0,0,1]);
+  const Tm = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
+  gl.uniformMatrix4fv(uM, false, mul(Tm, mul(rot, S)));
+  gl.uniformMatrix4fv(uRot, false, rot);
+  gl.uniform3fv(uColor, col); gl.uniform1f(uEmit, emit);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
+  gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aN);
+  gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 24, 0); gl.vertexAttribPointer(aN, 3, gl.FLOAT, false, 24, 12);
+  gl.drawArrays(gl.TRIANGLES, 0, mesh.n);
+}
+
+/* ---------- audio (all synthesized, no files) ---------- */
+let AC = null, master, musicBus, sfxBus, noiseBuf, eng = null, muted = false, combo = 0, comboAt = -9;
+try { muted = localStorage.getItem('canyon-mute') === '1'; } catch (e) {}
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+  AC = new Ctx();
+  master = AC.createGain(); master.gain.value = muted ? 0 : .8; master.connect(AC.destination);
+  musicBus = AC.createGain(); musicBus.gain.value = .35; musicBus.connect(master);
+  sfxBus = AC.createGain(); sfxBus.gain.value = .7; sfxBus.connect(master);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const src = AC.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+  const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 400; f.Q.value = .8;
+  const g = AC.createGain(); g.gain.value = 0;
+  src.connect(f); f.connect(g); g.connect(sfxBus); src.start(); eng = { f, g };
+}
+function tone(freq, t0, dur, type, vol, bus, slideTo, att) {
+  const o = AC.createOscillator(), g = AC.createGain(); att = att || .01;
+  o.type = type; o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(.0001, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + att);
+  g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+  o.connect(g); g.connect(bus || sfxBus); o.start(t0); o.stop(t0 + dur + .05);
+}
+function noise(t0, dur, vol, type, freq, bus) {
+  const s = AC.createBufferSource(); s.buffer = noiseBuf;
+  const f = AC.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+  const g = AC.createGain(); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+  s.connect(f); f.connect(g); g.connect(bus || sfxBus); s.start(t0, Math.random() * .5); s.stop(t0 + dur + .05);
+}
+function gemSfx() {
+  if (!AC) return; const n = AC.currentTime;
+  combo = (t - comboAt < 2.5) ? Math.min(combo + 1, 7) : 0; comboAt = t;
+  const base = 660 * Math.pow(2, [0, 2, 4, 7, 9, 12, 14, 16][combo] / 12);
+  tone(base, n, .12, 'triangle', .35); tone(base * 1.5, n + .06, .2, 'sine', .3);
+}
+function hitSfx() { if (!AC) return; const n = AC.currentTime; noise(n, .4, .9, 'lowpass', 900); tone(130, n, .4, 'sawtooth', .5, null, 40); }
+function sfxOver() { if (!AC) return; const n = AC.currentTime; [392, 330, 262, 196].forEach((f, i) => tone(f, n + .35 + i * .2, .45, 'triangle', .35)); }
+function sfxStart() { if (!AC) return; const n = AC.currentTime; tone(220, n, .4, 'square', .12, null, 660); tone(660, n + .25, .3, 'triangle', .25); }
+function sfxBlip(up) { if (!AC) return; tone(up ? 400 : 500, AC.currentTime, .12, 'sine', .25, null, up ? 600 : 300); }
+function engineSet(on) { if (eng) eng.g.gain.setTargetAtTime(on ? .12 : 0, AC.currentTime, .1); }
+function engineTune() { if (eng) eng.f.frequency.setTargetAtTime(280 + speed * 9, AC.currentTime, .15); }
+
+// music: a looping A-minor progression (Am, F, C, G) with layers that build up as you survive
+const BPM = 108, STEP = 60 / BPM / 2, CH = [[57, 60, 64], [53, 57, 60], [55, 60, 64], [55, 59, 62]], BASS = [45, 41, 36, 43];
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+let nextT = 0, mStep = 0, mTimer = null;
+function playStep(s, t0) {
+  const ci = Math.floor(s / 8) % 4, i = s % 8, ch = CH[ci], lvl = (t > 10) + (t > 30) + (t > 50), M = musicBus;
+  if (i % 2 === 0) tone(140, t0, .18, 'sine', .9, M, 45);
+  if (i === 0 || i === 3 || i === 4 || i === 6) tone(mtof(BASS[ci] + (i === 3 ? 12 : 0)), t0, STEP * 1.6, 'sawtooth', .2, M);
+  if (i === 0) ch.forEach(n => tone(mtof(n), t0, STEP * 8, 'triangle', .07, M, null, .5));
+  tone(mtof(ch[[0, 1, 2, 1, 0, 2, 1, 2][i]] + 12 + (lvl >= 3 && i % 2 ? 12 : 0)), t0, STEP * .9, 'square', .06, M);
+  if (lvl >= 1 && i % 2) noise(t0, .05, .12, 'highpass', 7000, M);
+  if (lvl >= 2 && (i === 2 || i === 6)) noise(t0, .18, .3, 'bandpass', 1800, M);
+}
+function schedule() { while (nextT < AC.currentTime + .2) { playStep(mStep, nextT); nextT += STEP; mStep++; } }
+function musicStart(fresh) {
+  if (!AC || mTimer) return;
+  if (fresh) mStep = 0;
+  nextT = AC.currentTime + .1; musicBus.gain.setTargetAtTime(.35, AC.currentTime, .05);
+  mTimer = setInterval(schedule, 50);
+}
+function musicStop(fade) {
+  clearInterval(mTimer); mTimer = null;
+  if (AC) musicBus.gain.setTargetAtTime(0, AC.currentTime, (fade || .3) / 3);
+}
+function updateMuteIcon() { $('mute').textContent = muted ? '\uD83D\uDD07' : '\uD83D\uDD0A'; $('mute').setAttribute('aria-label', muted ? 'Unmute' : 'Mute'); }
+function toggleMute() {
+  muted = !muted; try { localStorage.setItem('canyon-mute', muted ? '1' : '0'); } catch (e) {}
+  if (AC) master.gain.setTargetAtTime(muted ? 0 : .8, AC.currentTime, .03);
+  updateMuteIcon();
+}
+
+/* ---------- game state ---------- */
+const C = { floor: hex('#4a2e63'), pillarA: hex('#6b4a86'), pillarB: hex('#55386e'), stripe: hex('#ffb24d'),
+  ob1: hex('#ff6a4d'), ob2: hex('#e8523f'), gem: hex('#6fffc9'), ship: hex('#efe7d6') };
+const FLOOR_Y = -3.2, XR = 4.4, YR = 2.4;
+let best = 0; try { best = +localStorage.getItem('canyon-best') || 0; } catch (e) {}
+let playing = false, dist = 0, speed = 0, t = 0, gems = 0, shields = 3, inv = 0, acc = 0, flash = 0, objs = [];
+let p = { x: 0, y: 0 }, tgt = { x: 0, y: 0 }, tilt = 0, last = 0;
+const keys = {};
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+function spawnWave() {
+  const z0 = -150 + acc, n = 1 + (Math.random() < Math.min(.55, .2 + t / 100) ? 1 : 0);
+  const placed = [];
+  for (let i = 0; i < n; i++) {
+    let o;
+    if (Math.random() < .2) { const sy = 5.5; o = { x: rnd(-XR, XR), y: FLOOR_Y + sy / 2, sx: 1.6, sy };
+    } else o = { x: rnd(-XR, XR), y: rnd(-YR, YR), sx: rnd(1.4, 2.8), sy: rnd(1.4, 2.8) };
+    o.z = z0; o.sz = 2; o.t = 'o'; o.col = Math.random() < .5 ? C.ob1 : C.ob2;
+    placed.push(o); objs.push(o);
+  }
+  for (let k = 0; k < 12; k++) {
+    const g = { x: rnd(-XR, XR), y: rnd(-YR, YR) };
+    if (placed.every(o => Math.abs(g.x - o.x) > o.sx / 2 + 1 || Math.abs(g.y - o.y) > o.sy / 2 + 1)) {
+      objs.push({ t: 'g', x: g.x, y: g.y, z: z0 - 4, sx: .8, sy: .8, sz: .8, ph: rnd(0, 6) }); break;
+    }
+  }
+}
+function hud() {
+  $('score').textContent = Math.floor(dist / 10) + gems * 50 + ' m';
+  $('shield').textContent = '\u25C6'.repeat(Math.max(shields, 0)) || '\u2013';
+}
+function reset() {
+  objs = []; dist = 0; t = 0; gems = 0; shields = 3; inv = 0; acc = 0; flash = 0; speed = 28;
+  p = { x: 0, y: 0 }; tgt = { x: 0, y: 0 }; hud();
+}
+
+function update(dt) {
+  t += dt; speed = Math.min(75, 28 + t * .9); dist += speed * dt;
+  const ks = 7 * dt;
+  if (keys.ArrowLeft || keys.a) tgt.x -= ks; if (keys.ArrowRight || keys.d) tgt.x += ks;
+  if (keys.ArrowUp || keys.w) tgt.y += ks * .7; if (keys.ArrowDown || keys.s) tgt.y -= ks * .7;
+  if (joy.id !== null) {
+    const jx = Math.abs(joy.x) < .1 ? 0 : joy.x, jy = Math.abs(joy.y) < .1 ? 0 : joy.y;
+    tgt.x += jx * 10 * dt; tgt.y -= jy * 6 * dt;
+  }
+  tgt.x = Math.max(-XR, Math.min(XR, tgt.x)); tgt.y = Math.max(-YR, Math.min(YR, tgt.y));
+  const ox = p.x; const k = Math.min(1, dt * 8);
+  p.x += (tgt.x - p.x) * k; p.y += (tgt.y - p.y) * k;
+  tilt += ((p.x - ox) / Math.max(dt, .001) * -.06 - tilt) * Math.min(1, dt * 10);
+  acc += speed * dt; engineTune();
+  const gap = Math.max(13, 24 - t * .12);
+  if (acc >= gap) { acc -= gap; spawnWave(); }
+  if (inv > 0) inv -= dt; if (flash > 0) flash -= dt * 2;
+  for (let i = objs.length - 1; i >= 0; i--) {
+    const o = objs[i]; o.z += speed * dt;
+    if (o.z > 10) { objs.splice(i, 1); continue; }
+    if (o.t === 'o') {
+      if (inv <= 0 && Math.abs(p.x - o.x) < o.sx / 2 + .6 && Math.abs(p.y - o.y) < o.sy / 2 + .3 &&
+          o.z + o.sz / 2 > -1.2 && o.z - o.sz / 2 < .6) {
+        shields--; inv = 1.4; flash = .6; hud(); objs.splice(i, 1); hitSfx();
+        if (shields <= 0) { end(); return; }
+      }
+    } else if (Math.hypot(p.x - o.x, p.y - o.y, o.z) < 1.2) {
+      gems++; objs.splice(i, 1); hud(); gemSfx();
+    }
+  }
+  hud();
+}
+
+function render() {
+  const asp = cv.width / cv.height;
+  eye = [p.x * .5, p.y * .5 + 1.6, 7];
+  VP = mul(persp(Math.min(1.7, asp < 1.2 ? 2 * Math.atan(Math.tan(.525) * 1.2 / asp) : 1.05), asp, .1, 200), lookAt(eye, [p.x * .7, p.y * .7 + .2, -25], [0, 1, 0]));
+  gl.uniformMatrix4fv(uVP, false, VP); gl.uniform3fv(uCam, eye);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  draw(cube, 0, FLOOR_Y - .1, -90, 18, .2, 260, 0, 0, C.floor, 0);
+  const off = dist % 8;
+  for (let i = 0; i < 24; i++) draw(cube, 0, FLOOR_Y + .02, 8 - i * 8 + off, .25, .05, 3, 0, 0, C.stripe, .5);
+  const po = dist % 12, idx = Math.floor(dist / 12);
+  for (let i = 0; i < 18; i++) for (const s of [-1, 1]) {
+    const h = 8 + ((i + idx) * s % 3 + 3) % 3 * 3;
+    draw(cube, s * 8.5, FLOOR_Y + h / 2, 10 - i * 12 + po, 2, h, 4, 0, 0, (i + idx) % 2 ? C.pillarA : C.pillarB, 0);
+  }
+  for (const o of objs) {
+    if (o.t === 'o') draw(cube, o.x, o.y, o.z, o.sx, o.sy, o.sz, 0, 0, o.col, .08);
+    else draw(cube, o.x, o.y + Math.sin(t * 3 + o.ph) * .2, o.z, o.sx, o.sy, o.sz, t * 2 + o.ph, .6, C.gem, .9);
+  }
+  if (!(inv > 0 && Math.floor(t * 14) % 2)) draw(ship, p.x, p.y, 0, 1, 1, 1, 0, tilt, C.ship, .1);
+  $('flash').style.opacity = Math.max(0, flash) * .6;
+}
+
+function resize() {
+  const d = Math.min(devicePixelRatio || 1, 2);
+  cv.width = innerWidth * d; cv.height = innerHeight * d; gl.viewport(0, 0, cv.width, cv.height);
+}
+addEventListener('resize', resize); resize();
+
+function loop(ts) {
+  const dt = Math.min((ts - last) / 1000, .05); last = ts;
+  if (playing) { if (!paused) update(dt); } else { dist += 14 * dt; t += dt; }
+  render(); requestAnimationFrame(loop);
+}
+let paused = false, touchMode = matchMedia('(pointer: coarse)').matches;
+function applyMode() {
+  document.body.classList.toggle('mobile', touchMode);
+  $('how').textContent = touchMode ? 'Touch and drag anywhere to steer.' : 'Steer with your mouse or arrow keys / WASD.';
+}
+function setMode(type) {
+  const m = type === 'touch' ? true : type === 'mouse' ? false : touchMode;
+  if (m !== touchMode) { touchMode = m; applyMode(); }
+}
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 }, JR = 60;
+function joyMove(e) {
+  let dx = e.clientX - joy.ox, dy = e.clientY - joy.oy; const d = Math.hypot(dx, dy);
+  if (d > JR) { dx *= JR / d; dy *= JR / d; }
+  joy.x = dx / JR; joy.y = dy / JR; $('knob').style.transform = `translate(${dx}px,${dy}px)`;
+}
+function joyEnd() { joy.id = null; joy.x = joy.y = 0; $('joy').style.display = 'none'; }
+function start() {
+  initAudio(); sfxStart(); musicStart(true); engineSet(true);
+  reset(); playing = true; paused = false; document.body.classList.add('play'); $('panel').classList.add('hide');
+  $('tip').textContent = 'Touch and drag anywhere to steer'; $('tip').style.display = touchMode ? 'block' : 'none';
+}
+function pause() {
+  if (!playing || paused) return;
+  paused = true; joyEnd(); $('tip').style.display = 'none'; musicStop(.1); engineSet(false); sfxBlip(false);
+  $('title').textContent = 'Paused'; $('msg').textContent = 'Your glider is hovering.'; $('how').textContent = '';
+  $('go').textContent = 'Resume'; $('panel').classList.remove('hide'); $('go').focus();
+}
+function resume() { initAudio(); musicStart(false); engineSet(true); sfxBlip(true); paused = false; $('panel').classList.add('hide'); }
+function end() {
+  playing = false; paused = false; document.body.classList.remove('play'); joyEnd(); musicStop(.6); engineSet(false); sfxOver(); $('tip').style.display = 'none';
+  const sc = Math.floor(dist / 10) + gems * 50, nb = sc > best;
+  if (nb) { best = sc; try { localStorage.setItem('canyon-best', best); } catch (e) {} }
+  $('title').textContent = 'Glider down';
+  $('msg').textContent = `You covered ${sc} m with ${gems} ${gems === 1 ? 'crystal' : 'crystals'}. ` + (nb ? 'New best!' : `Best: ${best} m.`);
+  $('how').textContent = 'Speed picks up the longer you last, so look for gaps early.';
+  $('go').textContent = 'Fly again'; $('panel').classList.remove('hide'); $('go').focus();
+}
+$('go').addEventListener('click', () => paused ? resume() : start());
+$('pause').addEventListener('click', pause);
+document.addEventListener('visibilitychange', () => { if (document.hidden) { pause(); if (AC) AC.suspend(); } });
+$('mute').addEventListener('click', toggleMute);
+function aim(e) { tgt.x = (e.clientX / innerWidth - .5) * 2 * XR; tgt.y = -(e.clientY / innerHeight - .5) * 2 * YR; }
+addEventListener('pointerdown', e => {
+  if (e.target.closest('button')) return;
+  setMode(e.pointerType);
+  if (!playing || paused) return;
+  if (e.pointerType === 'touch') {
+    if (joy.id !== null) return;
+    joy.id = e.pointerId; joy.ox = e.clientX; joy.oy = e.clientY;
+    const j = $('joy'); j.style.left = e.clientX + 'px'; j.style.top = e.clientY + 'px'; j.style.display = 'block';
+    $('tip').style.display = 'none'; joyMove(e);
+  } else aim(e);
+});
+addEventListener('pointermove', e => {
+  if (!playing || paused) return;
+  if (e.pointerType === 'touch') { if (e.pointerId === joy.id) joyMove(e); } else aim(e);
+});
+const up = e => { if (e.pointerId === joy.id) joyEnd(); };
+addEventListener('pointerup', up); addEventListener('pointercancel', up);
+addEventListener('keydown', e => { const k = e.key.length === 1 ? e.key.toLowerCase() : e.key; keys[k] = true; if (k.startsWith('Arrow')) e.preventDefault(); if (k === 'Escape' || k === 'p') pause(); if (k === 'm') toggleMute(); });
+addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+reset(); applyMode(); updateMuteIcon(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
