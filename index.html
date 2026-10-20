@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Canyon Glide</title>
+<title>Plane Dodge</title>
 <style>
   :root { --fog:#24163a; --amber:#ffb24d; --mint:#6fffc9; --bone:#efe7d6; --coral:#ff6a4d; }
   * { box-sizing: border-box; }
@@ -47,9 +47,9 @@
 <button id="pause" aria-label="Pause">&#10074;&#10074;</button>
 <div id="hud"><span id="score">0 m</span><span id="shield" aria-label="shields">&#9670;&#9670;&#9670;</span></div>
 <div id="panel">
-  <h1 id="title">Canyon Glide</h1>
-  <p id="msg">Skim down the canyon in your glider. Dodge the coral blocks and grab the green crystals for bonus points.</p>
-  <p id="how">Steer with your mouse, finger, or arrow keys / WASD.</p>
+  <h1 id="title">Plane Dodge</h1>
+  <p id="msg">Fly down the canyon in your glider. Dodge the blocks and grab the crystals for bonus points.</p>
+  <p id="how">Move with your mouse, finger, or arrow keys / WASD.</p>
   <button id="go">Take off</button>
 </div>
 <script>
@@ -358,10 +358,10 @@ function end() {
   playing = false; paused = false; document.body.classList.remove('play'); joyEnd(); musicStop(.6); engineSet(false); sfxOver(); $('tip').style.display = 'none';
   const sc = Math.floor(dist / 10) + gems * 50, nb = sc > best;
   if (nb) { best = sc; try { localStorage.setItem('canyon-best', best); } catch (e) {} }
-  $('title').textContent = 'Glider down';
-  $('msg').textContent = `You covered ${sc} m with ${gems} ${gems === 1 ? 'crystal' : 'crystals'}. ` + (nb ? 'New best!' : `Best: ${best} m.`);
-  $('how').textContent = 'Speed picks up the longer you last, so look for gaps early.';
-  $('go').textContent = 'Fly again'; $('panel').classList.remove('hide'); $('go').focus();
+  $('title').textContent = 'Plane down';
+  $('msg').textContent = `You covered ${sc} m with ${gems} ${gems === 1 ? 'crystal' : 'crystals'}. ` + (nb ? 'New best, wow!' : `Best: ${best} m.`);
+  $('how').textContent = 'Speed picks up the longer you fly, so look for gaps early.';
+  $('go').textContent = 'Try again'; $('panel').classList.remove('hide'); $('go').focus();
 }
 $('go').addEventListener('click', () => paused ? resume() : start());
 $('pause').addEventListener('click', pause);
